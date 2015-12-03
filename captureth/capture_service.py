@@ -15,6 +15,7 @@ from ethereum.processblock import (
     verify,
     VMExt
 )
+from ethereum.utils import safe_ord
 from ethereum.slogging import get_logger
 from pyethapp.eth_service import ChainService as EthChainService
 log_chain = get_logger('eth.chain')
@@ -62,7 +63,7 @@ class Chain(EthChain):
                     self.revert_block_cb(reverted_blocks)
         super(Chain, self)._update_head(block, forward_pending_transactions)
 
-class ChainService(EthChain):
+class ChainService(EthChainService):
     current_block = 0
     addrs = set()
     start_blocks = {}
@@ -114,8 +115,9 @@ class CapVMExt(VMExt):
         self.cb = cb
 
     def _msg(self, msg):
-        self.cb(self, 'msg', msg.to, [msg, self.get_code(msg.code_address)])
-        return _apply_msg(self, msg, self.get_code(msg.code_address))
+        result, gas_remained, data = _apply_msg(self, msg, self.get_code(msg.code_address))
+        self.cb(self, 'msg', msg.to, [msg, self.get_code(msg.code_address), result, gas_remained, data])
+        return result, gas_remained, data
 
     def _log(self, addr, topics, data):
         self.cb(self, 'log', addr, [msg, topics, data])
