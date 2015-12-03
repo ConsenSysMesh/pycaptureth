@@ -1,6 +1,8 @@
+import copy
 from ethereum import vm
 from ethereum import opcodes
 from ethereum import transactions
+from ethereum import utils
 from ethereum.blocks import Block
 from ethereum.chain import Chain as EthChain
 from ethereum.config import Env, default_config
@@ -18,6 +20,8 @@ from ethereum.processblock import (
 from ethereum.utils import safe_ord
 from ethereum.slogging import get_logger
 from pyethapp.eth_service import ChainService as EthChainService
+from rlp.utils import decode_hex, encode_hex
+
 log_chain = get_logger('eth.chain')
 
 class Chain(EthChain):
@@ -81,10 +85,10 @@ class ChainService(EthChainService):
         # Load past blocks and parse for particular txs
         pass
 
-    def _callback(self, ext, method, addr, args):
-        if not addr in self.addrs or not hasattr(self, 'on_' + method):
+    def _callback(self, method, addr, *args):
+        if (len(self.addrs) and not addr in self.addrs) or not hasattr(self, 'on_' + method):
             return
-        getattr(self, 'on_' + method)(ext, addr, args)
+        getattr(self, 'on_' + method)(utils.encode_hex(addr), *args)
 
     def process_block(self, block):
         for tx in block.transaction_list:
@@ -93,34 +97,105 @@ class ChainService(EthChainService):
 
     # called with each processed block
     def on_block(self, block):
+        print 'on_block', block
         pass
 
     def on_revert_blocks(self, blocks):
+        print 'on_revert_blocks', blocks
         pass
 
     # call sent to address
-    def on_msg(self, ext, addr, args):
+    def on_msg(self, addr, *args):
+        print 'on_msg', addr, args
         pass
 
-    def on_log(self, ext, addr, args):
+    def on_log(self, addr, *args):
+        print 'on_log', addr, args
         pass
 
 # Override VMExt injecting callbacks before each log and inter-contract msg
 class CapVMExt(VMExt):
+
     def __init__(self, block, tx, cb):
         # super(CapVMExt, self).__init__(block, tx)
         VMExt.__init__(self, block, tx)
+        self._tx = tx
         self.log = self._log
         self.msg = self._msg
         self.cb = cb
 
+        # list of msgs in chrono order, used so msgs are cb-ed in correct order
+        self.msgs = []
+        # mapping from block.snapshot and Message instance
+        self.msgs_by_snap_hash = {}
+        # mapping from block.snapshot (de-facto msg.id) to the number of
+        # confirms remaning before it's considered "officiale"
+        self.msg_confirms_remaining = {}
+        self.success = set()
+        self.fail = set()
+
+    def initialize_msg(self, msg_id, msg):
+        self.msg_confirms_remaining[msg_id] = msg.depth
+        # use copy.copy here?
+        self.msgs_by_snap_hash[msg_id] = [msg]
+        self.msgs.append(msg_id)
+
+    def update_msg_status(self, msg_id, msg, result):
+        # update msgs with a higher depth
+        for snap in self.msg_confirms_remaining:
+            pending_count = self.msg_confirms_remaining[snap]
+            if pending_count == msg.depth:
+                self.msg_confirms_remaining[snap] -= result
+            if pending_count > msg.depth:
+                self.failed.add(snap)
+                del self.msg_confirms_remaining[snap]
+            if self.msg_confirms_remaining[snap] < 0:
+                self.success.add(snap)
+
+    # TODO: double check, but collisions here should not be possible since
+    # calls necessarily will use gas or fail
+    def snap_hash(self, msg, block):
+        snap = self.custom_snapshot(block)
+        # add the msg.depth to the hash to accounbt for the case where a CALL
+        # results in no gas or state change
+        snap['depth'] = msg.depth
+        for key in ['logs', 'journal', 'suicides']:
+            snap[key] = tuple(snap[key])
+        return hash(frozenset(snap.items()))
+
+    def callback_msgs(self):
+        for msg_id in self.msgs:
+            if msg_id in self.success:
+                msg = self.msgs_by_snap_hash[msg_id][0]
+                self.cb(*['msg', msg.to, self] + self.msgs_by_snap_hash[msg_id])
+
+    def custom_snapshot(self, block):
+        return {
+            'state': block.state.root_hash,
+            'gas': block.gas_used,
+            'txs': block.transactions.root_hash,
+            'suicides': block.suicides,
+            'logs': block.logs,
+            'journal': block.journal,
+            'ether_delta': block.ether_delta
+        }
+
     def _msg(self, msg):
+        msg_copy = copy.copy(msg)
+        start_gas = self._block.gas_used
+        msg_id = self.snap_hash(msg_copy, self._block)
+        self.initialize_msg(msg_id, msg_copy)
         result, gas_remained, data = _apply_msg(self, msg, self.get_code(msg.code_address))
-        self.cb(self, 'msg', msg.to, [msg, self.get_code(msg.code_address), result, gas_remained, data])
+        gas_used = self._block.gas_used - start_gas
+        self.msgs_by_snap_hash[msg_id] += [result, gas_used, data]
+        self.update_msg_status(msg_id, msg, result)
+        if msg.depth == 0:
+            self.callback_msgs()
+
         return result, gas_remained, data
 
     def _log(self, addr, topics, data):
-        self.cb(self, 'log', addr, [msg, topics, data])
+        self.cb('log', addr, self, msg, topics, data)
         self._block.add_log(Log(addr, topics, data))
 
 # forked from pyethereum.processblock, except uses CapVMExt
