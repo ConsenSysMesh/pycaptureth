@@ -131,6 +131,7 @@ class CapVMExt(VMExt):
         self.gas_left = tx.startgas
         self.log = self._log
         self.msg = self._msg
+        self.create = self._create
         self.cb = cb
 
         # list of msgs in chrono order, used so msgs are cb-ed in correct order
@@ -172,6 +173,10 @@ class CapVMExt(VMExt):
 
         for addr, topics, data in self.logs:
             self.cb('log', addr, self, topics, data)
+
+    def _create(self, msg):
+        create_contract(self, msg)
+        self.callbacks()
 
     def _msg(self, msg):
         msg_copy = copy.copy(msg)
@@ -225,6 +230,7 @@ def apply_transaction(block, tx, cb):
         log_tx.debug('_res_', result=result, gas_remained=gas_remained, data=data)
     else:  # CREATE
         result, gas_remained, data = create_contract(ext, message)
+        ext.callbacks()
         assert utils.is_numeric(gas_remained)
         log_tx.debug('_create_', result=result, gas_remained=gas_remained, data=data)
 
