@@ -12,6 +12,7 @@ from ethereum.processblock import (
     create_contract,
     CREATE_CONTRACT_ADDRESS,
     intrinsic_gas_used,
+    Log,
     log_tx,
     validate_transaction,
     verify,
@@ -195,7 +196,7 @@ class CapVMExt(VMExt):
         return result, gas_remained, data
 
     def _log(self, addr, topics, data):
-        self.cb('log', addr, self, msg, topics, data)
+        self.cb('log', addr, self, topics, data)
         self._block.add_log(Log(addr, topics, data))
 
 # forked from pyethereum.processblock, except uses CapVMExt
