@@ -25,6 +25,13 @@ from rlp.utils import decode_hex, encode_hex
 
 log_chain = get_logger('eth.chain')
 
+def tuplify(alist):
+    if alist is None:
+        return ()
+    if not isinstance(alist, list):
+        return alist
+    return tuple(map(tuplify, alist))
+
 class Chain(EthChain):
     def __init__(self, env, genesis=None, new_head_cb=None, coinbase='\x00' * 20, process_block_cb=None, revert_block_cb=None):
         super(Chain, self).__init__(env, genesis, new_head_cb, coinbase)
@@ -161,7 +168,7 @@ class CapVMExt(VMExt):
         # results in no gas or state change
         snap['depth'] = msg.depth
         for key in ['logs', 'journal', 'suicides']:
-            snap[key] = tuple(snap[key])
+            snap[key] = tuplify(snap[key])
         return hash(frozenset(snap.items()))
 
     def callback_msgs(self):
