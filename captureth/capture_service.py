@@ -238,44 +238,4 @@ def apply_transaction(block, tx, cb):
 
     log_tx.debug("TX APPLIED", result=result, gas_remained=gas_remained,
                  data=data)
-
-    '''
-    if not result:  # 0 = OOG failure in both cases
-        log_tx.debug('TX FAILED', reason='out of gas',
-                     startgas=tx.startgas, gas_remained=gas_remained)
-        # block.gas_used += tx.startgas
-        # block.delta_balance(block.coinbase, tx.gasprice * tx.startgas)
-        output = b''
-        success = 0
-    else:
-        log_tx.debug('TX SUCCESS', data=data)
-        gas_used = tx.startgas - gas_remained
-        # block.refunds += len(set(block.suicides)) * opcodes.GSUICIDEREFUND
-        if block.refunds > 0:
-            log_tx.debug('Refunding', gas_refunded=min(block.refunds, gas_used // 2))
-            gas_remained += min(block.refunds, gas_used // 2)
-            gas_used -= min(block.refunds, gas_used // 2)
-            block.refunds = 0
-        # sell remaining gas
-        block.delta_balance(tx.sender, tx.gasprice * gas_remained)
-        block.delta_balance(block.coinbase, tx.gasprice * gas_used)
-        block.gas_used += gas_used
-        if tx.to:
-            output = b''.join(map(ascii_chr, data))
-        else:
-            output = data
-        success = 1
-
-    # block.commit_state()
-    # suicides = block.suicides
-
-    block.suicides = []
-    for s in suicides:
-        block.ether_delta -= block.get_balance(s)
-        block.set_balance(s, 0)
-        block.del_account(s)
-    block.add_transaction_to_list(tx)
-    block.logs = []
-    return success, output
-    '''
     return
