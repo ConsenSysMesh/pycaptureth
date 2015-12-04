@@ -128,6 +128,7 @@ class CapVMExt(VMExt):
         # super(CapVMExt, self).__init__(block, tx)
         VMExt.__init__(self, block, tx)
         self._tx = tx
+        self.gas_left = tx.startgas
         self.log = self._log
         self.msg = self._msg
         self.cb = cb
@@ -190,11 +191,11 @@ class CapVMExt(VMExt):
 
     def _msg(self, msg):
         msg_copy = copy.copy(msg)
-        start_gas = self._block.gas_used
         msg_id = self.snap_hash(msg_copy, self._block)
         self.initialize_msg(msg_id, msg_copy)
         result, gas_remained, data = _apply_msg(self, msg, self.get_code(msg.code_address))
-        gas_used = self._block.gas_used - start_gas
+        gas_used = self.gas_left - gas_remained
+        self.gas_left = gas_remained
         self.msgs_by_snap_hash[msg_id] += [result, gas_used, data]
         self.update_msg_status(msg_id, msg, result)
         if msg.depth == 0:
