@@ -135,31 +135,13 @@ class CapVMExt(VMExt):
 
         # list of msgs in chrono order, used so msgs are cb-ed in correct order
         self.msgs = []
-        # mapping from block.snapshot and Message instance
+        self.logs = []
+        # mapping from block.snapshot and msg + relevant info
         self.msgs_by_snap_hash = {}
-        # mapping from block.snapshot (de-facto msg.id) to the number of
-        # confirms remaning before it's considered "officiale"
-        self.msg_confirms_remaining = {}
-        self.success = set()
-        self.fail = set()
 
     def initialize_msg(self, msg_id, msg):
-        self.msg_confirms_remaining[msg_id] = msg.depth
-        # use copy.copy here?
         self.msgs_by_snap_hash[msg_id] = [msg]
         self.msgs.append(msg_id)
-
-    def update_msg_status(self, msg_id, msg, result):
-        # update msgs with a higher depth
-        for snap in self.msg_confirms_remaining:
-            pending_count = self.msg_confirms_remaining[snap]
-            if pending_count == msg.depth:
-                self.msg_confirms_remaining[snap] -= result
-            if pending_count > msg.depth:
-                self.failed.add(snap)
-                del self.msg_confirms_remaining[snap]
-            if self.msg_confirms_remaining[snap] < 0:
-                self.success.add(snap)
 
     # TODO: double check, but collisions here should not be possible since
     # calls necessarily will use gas or fail
@@ -172,12 +154,6 @@ class CapVMExt(VMExt):
             snap[key] = tuplify(snap[key])
         return hash(frozenset(snap.items()))
 
-    def callback_msgs(self):
-        for msg_id in self.msgs:
-            if msg_id in self.success:
-                msg = self.msgs_by_snap_hash[msg_id][0]
-                self.cb(*['msg', msg.to, self] + self.msgs_by_snap_hash[msg_id])
-
     def custom_snapshot(self, block):
         return {
             'state': block.state.root_hash,
@@ -189,6 +165,14 @@ class CapVMExt(VMExt):
             'ether_delta': block.ether_delta
         }
 
+    def callbacks(self):
+        for msg_id in self.msgs:
+            msg = self.msgs_by_snap_hash[msg_id][0]
+            self.cb(*['msg', msg.to, self] + self.msgs_by_snap_hash[msg_id])
+
+        for addr, topics, data in self.logs:
+            self.cb('log', addr, self, topics, data)
+
     def _msg(self, msg):
         msg_copy = copy.copy(msg)
         msg_id = self.snap_hash(msg_copy, self._block)
@@ -197,14 +181,14 @@ class CapVMExt(VMExt):
         gas_used = self.gas_left - gas_remained
         self.gas_left = gas_remained
         self.msgs_by_snap_hash[msg_id] += [result, gas_used, data]
-        self.update_msg_status(msg_id, msg, result)
-        if msg.depth == 0:
-            self.callback_msgs()
+
+        if msg.depth == 0 and result == 1:
+            self.callbacks()
 
         return result, gas_remained, data
 
     def _log(self, addr, topics, data):
-        self.cb('log', addr, self, topics, data)
+        self.logs.append((addr, topics, data))
         self._block.add_log(Log(addr, topics, data))
 
 # forked from pyethereum.processblock, except uses CapVMExt
