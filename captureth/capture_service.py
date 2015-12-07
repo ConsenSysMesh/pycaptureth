@@ -76,27 +76,76 @@ class Chain(EthChain):
         super(Chain, self)._update_head(block, forward_pending_transactions)
 
 class ChainService(EthChainService):
-    current_block = 0
-    addrs = set()
     start_blocks = {}
 
     ## Config: {<address>: <startBlock>} or [<address>]
     ## startBlock === 0     => start from genesis
     ## startBlock < -1      => start from HEAD - <startBlock> + 1
     ## startBlock === None  => start from HEAD
-    def __init__(self, app, config={}):
+    def __init__(self, app):
         super(ChainService, self).__init__(app)
         sce = self.config['eth']
         env = Env(self.db, sce['block'])
         coinbase = app.services.accounts.coinbase
         self.chain = Chain(env, new_head_cb=self._on_new_head, coinbase=coinbase, process_block_cb=self.process_block, revert_block_cb=self.on_revert_blocks)
-        # Load past blocks and parse for particular txs
-        pass
 
-    def _callback(self, method, addr, *args):
-        if (len(self.addrs) and not addr in self.addrs) or not hasattr(self, 'on_' + method):
+        # sanitize the configured addrs
+        for addr in self.start_blocks.keys():
+            new_addr = addr
+            if new_addr[0:2] == '0x':
+                new_addr = new_addr[2:]
+
+            if new_addr != addr:
+                self.start_blocks[new_addr] = self.start_blocks[addr]
+                del self.start_blocks[addr]
+
+
+        # start at the minimum block number requested
+        block_candidates = [v for v in self.start_blocks.values() if isinstance(v, int) and v >= 0]
+        if block_candidates:
+            start_block = min(block_candidates)
+
+        # reprocess blocks up to head after casting from CachedBlock to Block
+        if start_block and start_block >= 0:
+            for block_num in range(start_block, self.chain.head.number):
+                block_hash = self.chain.index.get_block_by_number(block_num)
+                block = self.chain.get(block_hash)
+                block.__class__ = Block
+                self.process_block(block)
+
+    # callback parameter order: method, address, self, *[arguments]
+    def _callback(self, method, addr, ctx, *args):
+        # unsupported callback
+        if not hasattr(self, 'on_' + method):
             return
-        getattr(self, 'on_' + method)(utils.encode_hex(addr), *args)
+
+        def cb():
+            getattr(self, 'on_' + method)(utils.encode_hex(addr), ctx, *args)
+
+        if not len(self.start_blocks.keys()):
+            cb()
+
+        hex_addr = utils.encode_hex(addr)
+        # addr not configured
+        if hex_addr not in self.start_blocks:
+            return
+
+        start_block_num = self.start_blocks[hex_addr]
+        cur_block = ctx._block
+
+        # addr doesn't care about the current block
+        if start_block_num > cur_block.number:
+            return
+
+        # wait for HEAD
+        if start_block_num < 0 and cur_block != self.chain.head:
+            return
+
+        # wait for start_block_num
+        if start_block_num >= 0 and cur_block.number < start_block_num:
+            return
+
+        cb()
 
     def process_block(self, block):
         for tx in block.transaction_list:
@@ -125,7 +174,6 @@ class ChainService(EthChainService):
 class CapVMExt(VMExt):
 
     def __init__(self, block, tx, cb):
-        # super(CapVMExt, self).__init__(block, tx)
         VMExt.__init__(self, block, tx)
         self._tx = tx
         self.gas_left = tx.startgas
@@ -175,8 +223,9 @@ class CapVMExt(VMExt):
             self.cb('log', addr, self, topics, data)
 
     def _create(self, msg):
-        create_contract(self, msg)
+        output = create_contract(self, msg)
         self.callbacks()
+        return output
 
     def _msg(self, msg):
         msg_copy = copy.copy(msg)
@@ -198,14 +247,9 @@ class CapVMExt(VMExt):
 
 # forked from pyethereum.processblock, except uses CapVMExt
 def apply_transaction(block, tx, cb):
-    # validate_transaction(block, tx)
-
     log_tx.debug('TX NEW', tx_dict=tx.log_dict())
 
     # start transacting #################
-
-    # block.increment_nonce(tx.sender)
-
     p = block.get_parent()
 
     intrinsic_gas = intrinsic_gas_used(tx)
@@ -218,7 +262,6 @@ def apply_transaction(block, tx, cb):
 
     # buy startgas
     assert p.get_balance(tx.sender) >= tx.startgas * tx.gasprice
-    # p.delta_balance(tx.sender, -tx.startgas * tx.gasprice)
     message_gas = tx.startgas - intrinsic_gas
     message_data = vm.CallData([safe_ord(x) for x in tx.data], 0, len(tx.data))
     message = vm.Message(tx.sender, tx.to, tx.value, message_gas, message_data, code_address=tx.to)

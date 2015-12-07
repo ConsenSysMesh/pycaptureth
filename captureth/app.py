@@ -8,6 +8,7 @@ from devp2p.discovery import NodeDiscovery
 from devp2p.peermanager import PeerManager
 
 from capture_service import ChainService
+ChainService.start_blocks = {}
 
 __version__ = '0.0.1'
 Pyethapp.services = [
