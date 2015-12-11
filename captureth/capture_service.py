@@ -106,7 +106,7 @@ class ChainService(EthChainService):
             start_block = min(block_candidates)
 
         # reprocess blocks up to head after casting from CachedBlock to Block
-        if start_block and start_block >= 0:
+        if block_candidates and start_block and start_block >= 0:
             for block_num in range(start_block, self.chain.head.number):
                 block_hash = self.chain.index.get_block_by_number(block_num)
                 block = self.chain.get(block_hash)
@@ -194,8 +194,20 @@ class CapVMExt(VMExt):
 
     # TODO: double check, but collisions here should not be possible since
     # calls necessarily will use gas or fail
-    def snap_hash(self, msg, block):
-        snap = self.custom_snapshot(block)
+    @staticmethod
+    def snap_hash(msg, block):
+        def custom_snapshot(block):
+            return {
+                'state': block.state.root_hash,
+                'gas': block.gas_used,
+                'txs': block.transactions.root_hash,
+                'suicides': block.suicides,
+                'logs': block.logs,
+                'journal': block.journal,
+                'ether_delta': block.ether_delta
+            }
+
+        snap = custom_snapshot(block)
         # add the msg.depth to the hash to accounbt for the case where a CALL
         # results in no gas or state change
         snap['depth'] = msg.depth
@@ -203,21 +215,11 @@ class CapVMExt(VMExt):
             snap[key] = tuplify(snap[key])
         return hash(frozenset(snap.items()))
 
-    def custom_snapshot(self, block):
-        return {
-            'state': block.state.root_hash,
-            'gas': block.gas_used,
-            'txs': block.transactions.root_hash,
-            'suicides': block.suicides,
-            'logs': block.logs,
-            'journal': block.journal,
-            'ether_delta': block.ether_delta
-        }
 
     def callbacks(self):
         for msg_id in self.msgs:
             msg = self.msgs_by_snap_hash[msg_id][0]
-            self.cb(*['msg', msg.to, self] + self.msgs_by_snap_hash[msg_id])
+            self.cb(*['msg', msg.to, msg_id, self] + self.msgs_by_snap_hash[msg_id])
 
         for addr, topics, data in self.logs:
             self.cb('log', addr, self, topics, data)
