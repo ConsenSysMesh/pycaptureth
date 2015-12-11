@@ -77,6 +77,7 @@ class Chain(EthChain):
 
 class ChainService(EthChainService):
     start_blocks = {}
+    start_block = None
 
     ## Config: {<address>: <startBlock>} or [<address>]
     ## startBlock === 0     => start from genesis
@@ -100,13 +101,16 @@ class ChainService(EthChainService):
                 del self.start_blocks[addr]
 
 
+        start_block = None
         # start at the minimum block number requested
         block_candidates = [v for v in self.start_blocks.values() if isinstance(v, int) and v >= 0]
         if block_candidates:
             start_block = min(block_candidates)
+        if self.start_block is not None:
+            start_block = self.start_block
 
         # reprocess blocks up to head after casting from CachedBlock to Block
-        if block_candidates and start_block and start_block >= 0:
+        if start_block is not None and start_block >= 0:
             for block_num in range(start_block, self.chain.head.number):
                 block_hash = self.chain.index.get_block_by_number(block_num)
                 block = self.chain.get(block_hash)
@@ -122,15 +126,19 @@ class ChainService(EthChainService):
         def cb():
             getattr(self, 'on_' + method)(utils.encode_hex(addr), ctx, *args)
 
-        if not len(self.start_blocks.keys()):
+        if self.start_block is None and not len(self.start_blocks.keys()):
             cb()
 
         hex_addr = utils.encode_hex(addr)
         # addr not configured
-        if hex_addr not in self.start_blocks:
+        if self.start_block is None and hex_addr not in self.start_blocks:
             return
 
-        start_block_num = self.start_blocks[hex_addr]
+        if self.start_block is None:
+            start_block_num = self.start_blocks[hex_addr]
+        else:
+            start_block_num = self.start_block
+
         cur_block = ctx._block
 
         # addr doesn't care about the current block
