@@ -100,12 +100,7 @@ class ChainService(EthChainService):
                 self.start_blocks[new_addr] = self.start_blocks[addr]
                 del self.start_blocks[addr]
 
-
-        start_block = None
-        # start at the minimum block number requested
-        block_candidates = [v for v in self.start_blocks.values() if isinstance(v, int) and v >= 0]
-        if block_candidates:
-            start_block = min(block_candidates)
+    def sync(self, start_block):
         if self.start_block is not None:
             start_block = self.start_block
 
@@ -114,11 +109,15 @@ class ChainService(EthChainService):
             for block_num in range(start_block, self.chain.head.number):
                 block_hash = self.chain.index.get_block_by_number(block_num)
                 block = self.chain.get(block_hash)
-                block.__class__ = Block
-                self.process_block(block)
+                tmp_block = copy.copy(block)
+                tmp_block.__class__ = Block
+                print 'block.__class__', block.__class__.__name__
+                self.process_block(tmp_block)
+                tmp_block = block
 
+    '''
     # callback parameter order: method, address, self, *[arguments]
-    def _callback(self, method, addr, ctx, *args):
+    def _callback(self, method, addr, *args):
         # unsupported callback
         if not hasattr(self, 'on_' + method):
             return
@@ -154,6 +153,7 @@ class ChainService(EthChainService):
             return
 
         cb()
+    '''
 
     def process_block(self, block):
         for tx in block.transaction_list:
@@ -227,22 +227,24 @@ class CapVMExt(VMExt):
     def callbacks(self):
         for msg_id in self.msgs:
             msg = self.msgs_by_snap_hash[msg_id][0]
-            self.cb(*['msg', msg.to, msg_id, self] + self.msgs_by_snap_hash[msg_id])
+            self.cb(*['msg', msg.to, msg_id] + self.msgs_by_snap_hash[msg_id])
 
         for addr, topics, data in self.logs:
-            self.cb('log', addr, self, topics, data)
+            self.cb('log', addr, topics, data)
 
     def _create(self, msg):
-        output = create_contract(self, msg)
+        address = msg.sender
+        result, gas_remained, new_address = create_contract(self, msg)
+        self.cb('create', address, new_address)
         self.callbacks()
-        return output
+        return result, gas_remained, new_address
 
     def _msg(self, msg):
         msg_copy = copy.copy(msg)
         msg_id = self.snap_hash(msg_copy, self._block)
         self.initialize_msg(msg_id, msg_copy)
         result, gas_remained, data = _apply_msg(self, msg, self.get_code(msg.code_address))
-        gas_used = self.gas_left - gas_remained
+        gas_used = gas_remained - self.gas_left
         self.gas_left = gas_remained
         self.msgs_by_snap_hash[msg_id] += [result, gas_used, data]
 
@@ -282,8 +284,7 @@ def apply_transaction(block, tx, cb):
         result, gas_remained, data = ext._msg(message)
         log_tx.debug('_res_', result=result, gas_remained=gas_remained, data=data)
     else:  # CREATE
-        result, gas_remained, data = create_contract(ext, message)
-        ext.callbacks()
+        result, gas_remained, data = ext._create(message)
         assert utils.is_numeric(gas_remained)
         log_tx.debug('_create_', result=result, gas_remained=gas_remained, data=data)
 
