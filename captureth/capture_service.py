@@ -21,7 +21,7 @@ from ethereum.processblock import (
 from ethereum.utils import safe_ord
 from ethereum.slogging import get_logger
 from pyethapp.eth_service import ChainService as EthChainService
-from rlp.utils import decode_hex, encode_hex
+from rlp.utils import decode_hex, encode_hex, ascii_chr
 
 log_chain = get_logger('eth.chain')
 
@@ -111,49 +111,12 @@ class ChainService(EthChainService):
                 block = self.chain.get(block_hash)
                 tmp_block = copy.copy(block)
                 tmp_block.__class__ = Block
-                print 'block.__class__', block.__class__.__name__
                 self.process_block(tmp_block)
                 tmp_block = block
 
-    '''
     # callback parameter order: method, address, self, *[arguments]
     def _callback(self, method, addr, *args):
-        # unsupported callback
-        if not hasattr(self, 'on_' + method):
-            return
-
-        def cb():
-            getattr(self, 'on_' + method)(utils.encode_hex(addr), ctx, *args)
-
-        if self.start_block is None and not len(self.start_blocks.keys()):
-            cb()
-
-        hex_addr = utils.encode_hex(addr)
-        # addr not configured
-        if self.start_block is None and hex_addr not in self.start_blocks:
-            return
-
-        if self.start_block is None:
-            start_block_num = self.start_blocks[hex_addr]
-        else:
-            start_block_num = self.start_block
-
-        cur_block = ctx._block
-
-        # addr doesn't care about the current block
-        if start_block_num > cur_block.number:
-            return
-
-        # wait for HEAD
-        if start_block_num < 0 and cur_block != self.chain.head:
-            return
-
-        # wait for start_block_num
-        if start_block_num >= 0 and cur_block.number < start_block_num:
-            return
-
-        cb()
-    '''
+        print '_callback', method, addr, args
 
     def process_block(self, block):
         for tx in block.transaction_list:
@@ -167,15 +130,6 @@ class ChainService(EthChainService):
 
     def on_revert_blocks(self, blocks):
         print 'on_revert_blocks', blocks
-        pass
-
-    # call sent to address
-    def on_msg(self, addr, *args):
-        print 'on_msg', addr, args
-        pass
-
-    def on_log(self, addr, *args):
-        print 'on_log', addr, args
         pass
 
 # Override VMExt injecting callbacks before each log and inter-contract msg
@@ -258,7 +212,15 @@ class CapVMExt(VMExt):
         self._block.add_log(Log(addr, topics, data))
 
 # forked from pyethereum.processblock, except uses CapVMExt
-def apply_transaction(block, tx, cb):
+def apply_transaction(block, tx, cb=None):
+    eth_call = False
+    def dummy_cb(*args, **kwargs):
+        pass
+
+    if cb is None:
+        cb = dummy_cb
+        eth_call = True
+
     log_tx.debug('TX NEW', tx_dict=tx.log_dict())
 
     # start transacting #################
@@ -273,7 +235,8 @@ def apply_transaction(block, tx, cb):
                 raise InsufficientStartGas(rp('startgas', tx.startgas, intrinsic_gas))
 
     # buy startgas
-    assert p.get_balance(tx.sender) >= tx.startgas * tx.gasprice
+    if not eth_call:
+        assert p.get_balance(tx.sender) >= tx.startgas * tx.gasprice
     message_gas = tx.startgas - intrinsic_gas
     message_data = vm.CallData([safe_ord(x) for x in tx.data], 0, len(tx.data))
     message = vm.Message(tx.sender, tx.to, tx.value, message_gas, message_data, code_address=tx.to)
@@ -282,7 +245,7 @@ def apply_transaction(block, tx, cb):
     ext = CapVMExt(block, tx, cb)
     if tx.to and tx.to != CREATE_CONTRACT_ADDRESS:
         result, gas_remained, data = ext._msg(message)
-        log_tx.debug('_res_', result=result, gas_remained=gas_remained, data=data)
+        log_tx.warn('_res_', result=result, gas_remained=gas_remained, data=data)
     else:  # CREATE
         result, gas_remained, data = ext._create(message)
         assert utils.is_numeric(gas_remained)
@@ -292,4 +255,9 @@ def apply_transaction(block, tx, cb):
 
     log_tx.debug("TX APPLIED", result=result, gas_remained=gas_remained,
                  data=data)
-    return
+    if tx.to:
+        output = b''.join(map(ascii_chr, data))
+    else:
+        output = data
+
+    return result, output
