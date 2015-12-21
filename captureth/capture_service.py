@@ -3,7 +3,8 @@ from ethereum import vm
 from ethereum import opcodes
 from ethereum import transactions
 from ethereum import utils
-from ethereum.blocks import Block
+from ethereum import pruning_trie as trie
+from ethereum.blocks import Block, BlockHeader, get_block_header
 from ethereum.chain import Chain as EthChain
 from ethereum.config import Env, default_config
 from ethereum.exceptions import *
@@ -22,6 +23,7 @@ from ethereum.utils import safe_ord
 from ethereum.slogging import get_logger
 from pyethapp.eth_service import ChainService as EthChainService
 from rlp.utils import decode_hex, encode_hex, ascii_chr
+import rlp
 
 log_chain = get_logger('eth.chain')
 
@@ -75,6 +77,33 @@ class Chain(EthChain):
                     self.revert_block_cb(reverted_blocks)
         super(Chain, self)._update_head(block, forward_pending_transactions)
 
+def new_block(block, use_parent=True):
+    """Create a new block based on a parent block.
+
+    The block will not include any transactions and will not be finalized.
+    """
+    parent = block.get_parent()
+    header = BlockHeader(prevhash=parent.hash,
+                            uncles_hash=utils.sha3(rlp.encode([])),
+                            coinbase=block.coinbase,
+                            state_root=parent.state_root if use_parent else block.state_root,
+                            tx_list_root=trie.BLANK_ROOT,
+                            receipts_root=trie.BLANK_ROOT,
+                            bloom=0,
+                            difficulty=block.difficulty,
+                            mixhash='',
+                            number=parent.number + 1,
+                            gas_limit=block.gas_limit,
+                            gas_used=0,
+                            timestamp=block.timestamp,
+                            extra_data=block.extra_data,
+                            nonce=b'')
+    block = Block(header, [], [], env=parent.env if use_parent else block.env,
+                    parent=parent, making=True)
+    block.ancestor_hashes = [parent.hash] + parent.ancestor_hashes
+    block.log_listeners = parent.log_listeners
+    return block
+
 class ChainService(EthChainService):
     start_blocks = {}
     start_block = None
@@ -109,19 +138,17 @@ class ChainService(EthChainService):
             for block_num in range(start_block, self.chain.head.number):
                 block_hash = self.chain.index.get_block_by_number(block_num)
                 block = self.chain.get(block_hash)
-                tmp_block = copy.copy(block)
-                tmp_block.__class__ = Block
-                self.process_block(tmp_block)
-                tmp_block = block
+                self.process_block(block)
 
     # callback parameter order: method, address, self, *[arguments]
     def _callback(self, method, addr, *args):
         print '_callback', method, addr, args
 
     def process_block(self, block):
-        for tx in block.transaction_list:
-            apply_transaction(block, tx, self._callback)
-        self.on_block(block)
+        tmp_block = new_block(block)
+        for tx in block.get_transactions():
+            apply_transaction(tmp_block, tx, self._callback)
+        self.on_block(tmp_block)
 
     # called with each processed block
     def on_block(self, block):
@@ -198,7 +225,7 @@ class CapVMExt(VMExt):
         msg_id = self.snap_hash(msg_copy, self._block)
         self.initialize_msg(msg_id, msg_copy)
         result, gas_remained, data = _apply_msg(self, msg, self.get_code(msg.code_address))
-        gas_used = gas_remained - self.gas_left
+        gas_used = self.gas_left - gas_remained
         self.gas_left = gas_remained
         self.msgs_by_snap_hash[msg_id] += [result, gas_used, data]
 
@@ -211,8 +238,8 @@ class CapVMExt(VMExt):
         self.logs.append((addr, topics, data))
         self._block.add_log(Log(addr, topics, data))
 
-# forked from pyethereum.processblock, except uses CapVMExt
-def apply_transaction(block, tx, cb=None):
+
+def apply_transaction(block, tx, cb=None, validate=True):
     eth_call = False
     def dummy_cb(*args, **kwargs):
         pass
@@ -221,10 +248,12 @@ def apply_transaction(block, tx, cb=None):
         cb = dummy_cb
         eth_call = True
 
-    log_tx.debug('TX NEW', tx_dict=tx.log_dict())
+    if validate:
+        validate_transaction(block, tx)
 
+    log_tx.debug('TX NEW', tx_dict=tx.log_dict())
     # start transacting #################
-    p = block.get_parent()
+    block.increment_nonce(tx.sender)
 
     intrinsic_gas = intrinsic_gas_used(tx)
     if block.number >= block.config['HOMESTEAD_FORK_BLKNUM']:
@@ -235,8 +264,10 @@ def apply_transaction(block, tx, cb=None):
                 raise InsufficientStartGas(rp('startgas', tx.startgas, intrinsic_gas))
 
     # buy startgas
-    if not eth_call:
-        assert p.get_balance(tx.sender) >= tx.startgas * tx.gasprice
+    if validate:
+        assert block.get_balance(tx.sender) >= tx.startgas * tx.gasprice
+
+    block.delta_balance(tx.sender, -tx.startgas * tx.gasprice)
     message_gas = tx.startgas - intrinsic_gas
     message_data = vm.CallData([safe_ord(x) for x in tx.data], 0, len(tx.data))
     message = vm.Message(tx.sender, tx.to, tx.value, message_gas, message_data, code_address=tx.to)
@@ -245,9 +276,9 @@ def apply_transaction(block, tx, cb=None):
     ext = CapVMExt(block, tx, cb)
     if tx.to and tx.to != CREATE_CONTRACT_ADDRESS:
         result, gas_remained, data = ext._msg(message)
-        log_tx.warn('_res_', result=result, gas_remained=gas_remained, data=data)
+        log_tx.debug('_res_', result=result, gas_remained=gas_remained, data=data)
     else:  # CREATE
-        result, gas_remained, data = ext._create(message)
+        result, gas_remained, data = create_contract(ext, message)
         assert utils.is_numeric(gas_remained)
         log_tx.debug('_create_', result=result, gas_remained=gas_remained, data=data)
 
@@ -255,9 +286,39 @@ def apply_transaction(block, tx, cb=None):
 
     log_tx.debug("TX APPLIED", result=result, gas_remained=gas_remained,
                  data=data)
-    if tx.to:
-        output = b''.join(map(ascii_chr, data))
-    else:
-        output = data
 
-    return result, output
+    if not result:  # 0 = OOG failure in both cases
+        log_tx.debug('TX FAILED', reason='out of gas',
+                     startgas=tx.startgas, gas_remained=gas_remained)
+        block.gas_used += tx.startgas
+        block.delta_balance(block.coinbase, tx.gasprice * tx.startgas)
+        output = b''
+        success = 0
+    else:
+        log_tx.debug('TX SUCCESS', data=data)
+        gas_used = tx.startgas - gas_remained
+        block.refunds += len(set(block.suicides)) * opcodes.GSUICIDEREFUND
+        if block.refunds > 0:
+            log_tx.debug('Refunding', gas_refunded=min(block.refunds, gas_used // 2))
+            gas_remained += min(block.refunds, gas_used // 2)
+            gas_used -= min(block.refunds, gas_used // 2)
+            block.refunds = 0
+        # sell remaining gas
+        block.delta_balance(tx.sender, tx.gasprice * gas_remained)
+        block.delta_balance(block.coinbase, tx.gasprice * gas_used)
+        block.gas_used += gas_used
+        if tx.to:
+            output = b''.join(map(ascii_chr, data))
+        else:
+            output = data
+        success = 1
+    block.commit_state()
+    suicides = block.suicides
+    block.suicides = []
+    for s in suicides:
+        block.ether_delta -= block.get_balance(s)
+        block.set_balance(s, 0)
+        block.del_account(s)
+    block.add_transaction_to_list(tx)
+    block.logs = []
+    return success, output
