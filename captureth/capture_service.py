@@ -25,6 +25,7 @@ from ethereum.slogging import get_logger
 from pyethapp.eth_service import ChainService as EthChainService
 from rlp.utils import decode_hex, encode_hex, ascii_chr
 import rlp
+from tqdm import tqdm
 
 log_chain = get_logger('eth.chain')
 
@@ -119,6 +120,7 @@ class ChainService(EthChainService):
         env = Env(self.db, sce['block'])
         coinbase = app.services.accounts.coinbase
         self.chain = Chain(env, new_head_cb=self._on_new_head, coinbase=coinbase, process_block_cb=self.process_block, revert_block_cb=self.on_revert_blocks)
+        self.progress_bar = True
 
         # sanitize the configured addrs
         for addr in self.start_blocks.keys():
@@ -136,7 +138,10 @@ class ChainService(EthChainService):
 
         # reprocess blocks up to head after casting from CachedBlock to Block
         if start_block is not None and start_block >= 0:
-            for block_num in range(start_block, self.chain.head.number):
+            block_range = range(start_block, self.chain.head.number)
+            if self.progress_bar:
+                block_range = tqdm(block_range)
+            for block_num in block_range:
                 block_hash = self.chain.index.get_block_by_number(block_num)
                 block = self.chain.get(block_hash)
                 self.process_block(block)
