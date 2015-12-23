@@ -1,4 +1,5 @@
 import copy
+from collections import defaultdict
 from ethereum import vm
 from ethereum import opcodes
 from ethereum import transactions
@@ -171,15 +172,32 @@ class CapVMExt(VMExt):
         self.create = self._create
         self.cb = cb
 
-        # list of msgs in chrono order, used so msgs are cb-ed in correct order
-        self.msgs = []
-        self.logs = []
+        # list of msgs, logs, creates in chrono order, used so cbs are called in correct order
+        self.activities = []
+
         # mapping from block.snapshot and msg + relevant info
-        self.msgs_by_snap_hash = {}
+        self.msgs_by_id = {}
+        self.logs_by_id = defaultdict(list)
+        self.creates_by_id = defaultdict(list)
+        self.current_msg = None
+        self.msg_confirms_remaining = {}
+        self.successes = set()
 
     def initialize_msg(self, msg_id, msg):
-        self.msgs_by_snap_hash[msg_id] = [msg]
-        self.msgs.append(msg_id)
+        self.msgs_by_id[msg_id] = (msg.to, msg_id, msg)
+        self.msg_confirms_remaining[msg_id] = msg.depth
+        self.activities.append((msg_id, 'msg'))
+        self.current_msg = msg_id
+
+    def update_msg_status(self, msg_id, msg, result):
+        for m in self.msg_confirms_remaining:
+            confirms = self.msg_confirms_remaining[m]
+            if confirms == msg.depth:
+                self.msg_confirms_remaining[m] -= result
+            if confirms > msg.depth:
+                del self.msg_confirms_remaining[m]
+            if self.msg_confirms_remaining[m] < 0:
+                self.successes.add(m)
 
     # TODO: double check, but collisions here should not be possible since
     # calls necessarily will use gas or fail
@@ -206,36 +224,46 @@ class CapVMExt(VMExt):
 
 
     def callbacks(self):
-        for msg_id in self.msgs:
-            msg = self.msgs_by_snap_hash[msg_id][0]
-            self.cb(*['msg', msg.to, msg_id] + self.msgs_by_snap_hash[msg_id])
+        for msg_id, method in self.activities:
+            data = getattr(self, method + 's_by_id')[msg_id]
 
-        for addr, topics, data in self.logs:
-            self.cb('log', addr, topics, data)
+            if type(data) is list:
+                data = data.pop()
+
+            if msg_id in self.successes:
+                self.cb(method, *data)
 
     def _create(self, msg):
         address = msg.sender
+
         result, gas_remained, new_address = create_contract(self, msg)
-        self.cb('create', address, new_address)
-        self.callbacks()
+
+        if result:
+            self.activities.append((self.current_msg, 'create'))
+            self.creates_by_id[self.current_msg].append((address, new_address))
+
         return result, gas_remained, new_address
 
     def _msg(self, msg):
         msg_copy = copy.copy(msg)
         msg_id = self.snap_hash(msg_copy, self._block)
+        prev_msg = self.current_msg
         self.initialize_msg(msg_id, msg_copy)
         result, gas_remained, data = _apply_msg(self, msg, self.get_code(msg.code_address))
         gas_used = self.gas_left - gas_remained
+        self.current_msg = prev_msg
         self.gas_left = gas_remained
-        self.msgs_by_snap_hash[msg_id] += [result, gas_used, data]
+        self.msgs_by_id[msg_id] += (result, gas_used, data)
+        self.update_msg_status(msg_id, msg, result)
 
-        if msg.depth == 0 and result == 1:
+        if msg.depth == 0:
             self.callbacks()
 
         return result, gas_remained, data
 
     def _log(self, addr, topics, data):
-        self.logs.append((addr, topics, data))
+        self.logs_by_id[self.current_msg].append((addr, topics, data))
+        self.activities.append((self.current_msg, 'log'))
         self._block.add_log(Log(addr, topics, data))
 
 
