@@ -190,14 +190,18 @@ class CapVMExt(VMExt):
         self.current_msg = msg_id
 
     def update_msg_status(self, msg_id, msg, result):
+        delset = set()
         for m in self.msg_confirms_remaining:
             confirms = self.msg_confirms_remaining[m]
             if confirms == msg.depth:
                 self.msg_confirms_remaining[m] -= result
             if confirms > msg.depth:
-                del self.msg_confirms_remaining[m]
+                delset.add(m)
             if self.msg_confirms_remaining[m] < 0:
                 self.successes.add(m)
+
+        for m in delset:
+            del self.msg_confirms_remaining[m]
 
     # TODO: double check, but collisions here should not be possible since
     # calls necessarily will use gas or fail
