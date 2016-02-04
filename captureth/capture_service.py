@@ -57,7 +57,7 @@ class Chain(EthChain):
             h = self.head
             b_children = []
             if b.hash != h.hash:
-                log_chain.warn('reverting')
+                log_chain.warn('reverting', block)
                 # revert head back to number of block.parent
                 while h.number > b.number:
                     reverted_blocks.append(h)
