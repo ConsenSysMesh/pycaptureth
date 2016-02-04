@@ -50,6 +50,7 @@ class Chain(EthChain):
         return success
 
     def _update_head(self, block, forward_pending_transactions=True):
+        success = True
         reverted_blocks = []
         if block.number > 0:
             b = block.get_parent()
@@ -72,12 +73,12 @@ class Chain(EthChain):
                     h = h.get_parent()
                     b_children.append(b)
                     b = b.get_parent()
-                success = True
                 for bc in b_children:
                     success = success and verify(bc, bc.get_parent())
-                if success and self.revert_block_cb:
-                    self.revert_block_cb(reverted_blocks)
         super(Chain, self)._update_head(block, forward_pending_transactions)
+        # revert the db after chain.head is updated
+        if success and reverted_blocks and self.revert_block_cb:
+            self.revert_block_cb(reverted_blocks)
 
 def new_block(block, use_parent=True):
     """Create a new block based on a parent block.
